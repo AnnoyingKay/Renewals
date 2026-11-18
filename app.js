@@ -2,11 +2,18 @@
    Data lives in Firebase (same project and sign in as Shelf, Musicbox and SavePoint). */
 import * as L from './logic.js';
 
-export const APP_VER = 1;
+export const APP_VER = 3;
 const FB_VER = '10.14.1';
 const COL = { items: 'renewals', cars: 'renewalsCars', history: 'renewalsHistory' };
 const CACHE_KEY = 'renewals.cache.v1', SYNC_KEY = 'renewals.lastSync', THEME_KEY = 'renewals.theme';
-const THEMES = [['auto', 'Automatic'], ['calm', 'Calm'], ['sand', 'Sand'], ['slate', 'Slate'], ['night', 'Night']];
+const THEMES = [['auto', 'Automatic', '#2c5e6e'], ['calm', 'Calm', '#2c5e6e'], ['night', 'Night', '#7fb7c8'], ['autobahn', 'Autobahn', '#0d2f66'], ['cinema', 'Cinema Night', '#d2323c'],
+  ['parcel', 'Parcel', '#c79a5c'], ['storybook', 'Storybook', '#f2c14e'], ['household', 'Household', '#a5532f']];
+const BAR = { auto: '#2c5e6e', calm: '#2c5e6e', night: '#0f2a33', autobahn: '#0a2559', cinema: '#2a0d10', parcel: '#c79a5c', storybook: '#262a7a', household: '#d99768' };
+const themeNow = () => { let t = 'auto'; try { t = localStorage.getItem(THEME_KEY) || 'auto'; } catch (e) {} return THEMES.some(x => x[0] === t) ? t : 'auto'; };
+function applyTheme(k) {
+  document.documentElement.dataset.theme = k;
+  const m = document.querySelector('#tc'); if (m) m.content = BAR[k] || '#2c5e6e';
+}
 const FILTERS = [['all', 'All'], ['car', 'Car'], ['subscription', 'Subscriptions']];
 const HIST_FILTERS = [['all', 'All'], ['carService', 'Service'], ['carInsurance', 'Insurance'], ['nct', 'NCT'], ['motorTax', 'Motor tax'], ['subscription', 'Subscriptions']];
 
@@ -16,10 +23,10 @@ const today = () => L.todayISO();
 const now = () => Date.now();
 
 const S = {
-  tab: 'due', view: 'list', filter: 'all', hfilter: 'all',
+  tab: 'home', view: 'list', filter: 'all', hfilter: 'all',
   user: null, ready: false, denied: false, fbError: '',
   items: [], cars: [], history: [], loaded: { items: false, cars: false, history: false },
-  lastSync: 0, syncMsg: '', adv: false
+  lastSync: 0, syncMsg: '', adv: false, flipped: new Set()
 };
 try { S.lastSync = +localStorage.getItem(SYNC_KEY) || 0; } catch (e) {}
 let form = null, doneForm = null, FB = null, unsubs = [], installEvt = null, rolling = false, rollFailed = 0;
@@ -51,13 +58,21 @@ function itemTitle(d) {
   return car ? c + ' (' + car + ')' : c;
 }
 const ICONS = {
+  home: '<path d="M4 11l8-7 8 7v9H4z"/><path d="M10 20v-6h4v6"/>',
   due: '<path d="M4 6h16v14H4z"/><path d="M4 10h16M8 3v4M16 3v4M9 15l2 2 4-4"/>',
   subs: '<path d="M20 12a8 8 0 0 1-14 5.3M4 12a8 8 0 0 1 14-5.3"/><path d="M18 3v4h-4M6 21v-4h4"/>',
   cars: '<path d="M5 16V12l2-5h10l2 5v4M3 16h18v3H3zM7 19v2M17 19v2"/><circle cx="7.5" cy="13.5" r=".6"/><circle cx="16.5" cy="13.5" r=".6"/>',
   history: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
   settings: '<path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/>'
 };
-const TABS = [['due', 'Due'], ['subs', 'Subs'], ['cars', 'Cars'], ['history', 'History'], ['settings', 'Settings']];
+const GLYPH = {
+  subscription: '<path d="M20 12a8 8 0 0 1-14 5.3M4 12a8 8 0 0 1 14-5.3"/><path d="M18 3v4h-4M6 21v-4h4"/>',
+  carService: '<path d="M14.5 6a4 4 0 0 0-5 5L4 16.5 7.5 20 13 14.5a4 4 0 0 0 5-5l-2.5 2.5-2.5-.5-.5-2.5z"/>',
+  carInsurance: '<path d="M12 3l7 3v5c0 5-3 8-7 10-4-2-7-5-7-10V6z"/><path d="M9 12l2 2 4-4"/>',
+  nct: '<circle cx="12" cy="12" r="9"/><path d="M8 12.5l3 3 5-6"/>',
+  motorTax: '<rect x="4" y="5" width="16" height="14" rx="2"/><path d="M4 10h16M8 15h4"/>'
+};
+const TABS = [['home', 'Home'], ['due', 'Due'], ['subs', 'Subs'], ['cars', 'Cars'], ['history', 'History'], ['settings', 'Settings']];
 
 /* ---------- Firebase ---------- */
 async function fbInit() {
@@ -174,6 +189,33 @@ async function exportBackup() {
   } catch (e) { toast('Could not read the data for a backup. Try again online.'); }
 }
 
+/* Import: reads a Renewals backup file. Same ids are replaced, so loading the same file twice changes nothing. */
+function pickImport() {
+  const i = document.createElement('input'); i.type = 'file'; i.accept = '.json,application/json';
+  i.onchange = () => { if (i.files && i.files[0]) runImport(i.files[0]); };
+  i.click();
+}
+async function runImport(file) {
+  if (!canWrite()) return;
+  await fbInit();
+  let obj;
+  try { obj = JSON.parse(await file.text()); } catch (e) { toast('That file could not be read. Use a Renewals backup file.'); return; }
+  const r = L.validateImport(obj, now());
+  if (r.errors.length) { toast('Import stopped. ' + r.errors[0]); return; }
+  const total = r.items.length + r.cars.length + r.history.length;
+  if (!total) { toast('There is nothing in that file to import.'); return; }
+  if (!confirm('Import ' + r.items.length + ' items, ' + r.cars.length + ' cars and ' + r.history.length + ' history rows? Anything with the same ID is replaced.')) return;
+  try {
+    const jobs = [...r.cars.map(d => [COL.cars, d]), ...r.items.map(d => [COL.items, d]), ...r.history.map(d => [COL.history, d])];
+    for (let k = 0; k < jobs.length; k += 400) {
+      const b = FB.F.writeBatch(FB.db);
+      jobs.slice(k, k + 400).forEach(([c, d]) => { const { id, ...rest } = d; b.set(ref(c, id), { ...rest, addedBy: S.user.uid }); });
+      await b.commit();
+    }
+    toast('Imported ' + total + ' rows.');
+  } catch (e) { toast('The import did not finish. Nothing is lost, so you can run it again.'); }
+}
+
 /* ---------- subscriptions bill themselves ---------- */
 async function maybeAutoRoll() {
   if (rolling || !S.user || !FB || !navigator.onLine || now() - rollFailed < 60000 || !S.loaded.items) return;
@@ -197,10 +239,11 @@ function histDoc(item, x) {
 /* ---------- rendering ---------- */
 function render() {
   $('#tabs').innerHTML = TABS.map(([k, n]) => `<button type="button" data-tab="${k}" class="${S.tab === k ? 'on' : ''}" ${S.tab === k ? 'aria-current="page"' : ''}><svg viewBox="0 0 24 24" aria-hidden="true">${ICONS[k]}</svg>${n}</button>`).join('');
-  $('#fab').hidden = !(S.user && ['due', 'subs', 'cars'].includes(S.tab));
+  $('#fab').hidden = !(S.user && !S.denied && ['due', 'subs', 'cars'].includes(S.tab));
   $('#fab').setAttribute('aria-label', S.tab === 'cars' ? 'Add car' : S.tab === 'subs' ? 'Add subscription' : 'Add item');
   const gate = gateHTML();
-  const body = gate || (S.tab === 'due' ? dueHTML() : S.tab === 'subs' ? subsHTML() : S.tab === 'cars' ? carsHTML() : S.tab === 'history' ? historyHTML() : '');
+  document.body.classList.toggle('tab-home', S.tab === 'home');
+  const body = S.tab === 'home' ? homeHTML(gate) : gate || (S.tab === 'due' ? dueHTML() : S.tab === 'subs' ? subsHTML() : S.tab === 'cars' ? carsHTML() : S.tab === 'history' ? historyHTML() : '');
   if (S.tab === 'settings') $('#main').innerHTML = settingsHTML(); else $('#main').innerHTML = body;
   $('#hello').textContent = helloText();
   const open = !$('#sheet').hidden; if (open) redrawSheet(true);
@@ -224,6 +267,38 @@ function helloText() {
   if (S.tab === 'subs') { const x = L.subTotals(S.items); return x.count ? x.count + ' subscription' + (x.count === 1 ? '' : 's') + ', ' + money(x.month) + ' a month' : ''; }
   if (S.tab === 'cars') return S.cars.length ? S.cars.length + (S.cars.length === 1 ? ' car' : ' cars') : '';
   return '';
+}
+
+/* ---------- cover page ---------- */
+function homeHTML(gate) {
+  const t = today(), h = new Date().getHours(), name = L.firstName(S.user && S.user.displayName);
+  const rows = L.dueList(S.items, S.cars, t, 365);
+  const overdue = rows.filter(r => r.days < 0 || (r.byKm && r.level === 3)).length;
+  const next30 = rows.filter(r => r.days >= 0 && r.days <= 30);
+  const tot = L.subTotals(S.items), unused = S.items.filter(i => i.category === 'subscription' && i.status === 'active' && i.stillUsing === false);
+  const line = L.coverLine({ tracked: S.items.filter(i => i.status === 'active').length, subCount: tot.count, yearly: tot.year, monthly: tot.month, overdue,
+    unusedMonthly: tot.unusedMonth, unusedName: unused.length ? unused[0].title : '', next30: next30.length, seed: L.seedFor(t, S.user && S.user.uid) });
+  const hero = `<section class="hero"><div class="brand">Renewals</div><div class="kick">${esc(L.fmtLong(t))}</div><h2>${esc(L.greeting(h, name))}</h2><p class="snark">${esc(S.user && !S.denied && S.ready ? line : 'Everything you pay for, in one place.')}</p></section>`;
+  if (gate) return hero + `<div style="margin-top:16px">${gate}</div>`;
+  const amt30 = next30.reduce((s, r) => s + (+r.item.amount || 0), 0);
+  const strip = `<div class="strip"><div><b>${esc(money(amt30) || '€0.00')}</b><span>next 30 days, ${next30.length} ${next30.length === 1 ? 'payment' : 'payments'}</span></div><div><b>${esc(money(tot.year) || '€0.00')}</b><span>subscriptions a year</span></div></div>`;
+  const alert = overdue ? `<button class="alert" type="button" data-tab="due"><span>${overdue} overdue</span><span>See them</span></button>` : '';
+  const cards = rows.slice(0, 8);
+  const deck = cards.length ? `<div class="hd"><h3>Coming up</h3><button type="button" data-tab="due">See everything</button></div><div class="deck" aria-label="Next payments">${cards.map(cardHTML).join('')}</div><p class="note" style="margin:0">Tap a card to turn it over.</p>`
+    : `<div class="empty">${S.items.length ? 'Nothing coming up.' : 'Nothing tracked yet.'}<br><button class="btn p" style="margin-top:12px" type="button" data-tab="due">${S.items.length ? 'Open Due' : 'Add the first item'}</button></div>`;
+  return hero + strip + alert + deck;
+}
+function cardHTML(r) {
+  const it = r.item, lvl = L.LEVELS[r.level], car = carById(it.carId), flipped = S.flipped.has(it.id);
+  const rel = (r.byKm && r.level >= 1) ? (r.level === 3 ? 'Service overdue' : 'Service due soon') : L.relText(r.days);
+  const hist = S.history.filter(h => h.itemId === it.id).sort((a, b) => (b.doneAt || '').localeCompare(a.doneAt || ''))[0];
+  const mc = L.monthlyCost(it), kv = (k, v) => v ? `<div class="kv"><span>${k}</span><span>${v}</span></div>` : '';
+  return `<div class="fc${flipped ? ' flipped' : ''}" data-card="${esc(it.id)}" tabindex="0" role="group" aria-label="${esc(it.title)}, ${esc(rel)}. Press Enter to turn over."><div class="fc-in">
+    <div class="face"><div class="cover"><svg viewBox="0 0 24 24" aria-hidden="true">${GLYPH[it.category] || GLYPH.subscription}</svg><span>${esc(L.catLabel(it.category))}</span><span class="flip">Turn over</span></div>
+      <div class="fb"><div class="t">${esc(it.title)}</div><div class="s">${esc([it.provider, car && car.name].filter(Boolean).join(' · ')) || '&nbsp;'}</div></div>
+      <div class="ff"><div><b>${esc(L.fmtDay(it.dueDate))}</b><span class="rel ${lvl}">${esc(rel)}</span></div><div class="amt">${esc(money(it.amount))}</div></div></div>
+    <div class="face back">${kv('Repeats', esc(L.repeatText(it.repeat)))}${kv('Per month', mc ? esc(money(mc)) : '')}${kv('Last paid', hist ? esc((hist.amountPaid != null ? money(hist.amountPaid) + ', ' : '') + L.fmtDay(hist.doneAt)) : '')}${kv('Reminders', esc((it.leadDays || []).slice().sort((a, b) => b - a).join(', ') + ' days'))}
+      <div class="setrow"><button class="btn p" type="button" data-open="${esc(it.id)}">Open</button><button class="btn" type="button" data-calone="${esc(it.id)}">Calendar</button></div></div></div></div>`;
 }
 
 function rowHTML(r, o) {
@@ -301,13 +376,13 @@ function historyHTML() {
 }
 
 function settingsHTML() {
-  const theme = localStorage.getItem(THEME_KEY) || 'auto';
+  const theme = themeNow();
   const sync = !S.ready ? '<p class="note">Checking…</p>' : S.fbError && !S.user ? `<p class="note">${esc(S.fbError)}</p>` : !S.user
     ? `<p class="note">Sign in with the same Google account as the other apps.</p><div class="setrow"><button class="btn p" type="button" data-act="signin">Continue with Google</button></div>`
     : `<p class="note">Signed in as ${esc(S.user.email || '')}.<br><span id="syncStatus">${esc(syncText())}</span></p>
-       <div class="setrow"><button class="btn p" type="button" data-act="syncnow">Sync now</button><button class="btn" type="button" data-act="export">Export backup</button><button class="btn" type="button" data-act="signout">Sign out</button></div>`;
+       <div class="setrow"><button class="btn p" type="button" data-act="syncnow">Sync now</button><button class="btn" type="button" data-act="export">Export backup</button><button class="btn" type="button" data-act="import">Import from file</button><button class="btn" type="button" data-act="signout">Sign out</button></div>`;
   return `<div class="sec"><h3>Renewals version ${APP_VER}</h3></div>
-  <div class="sec"><h3>Profile</h3><div class="lbl">Theme</div><div class="chips" style="flex-wrap:wrap">${THEMES.map(([k, n]) => `<button type="button" data-theme="${k}" class="${theme === k ? 'on' : ''}">${n}</button>`).join('')}</div>
+  <div class="sec"><h3>Profile</h3><div class="lbl">Theme</div><div class="chips wrap">${THEMES.map(([k, n, c]) => `<button type="button" data-theme="${k}" class="${theme === k ? 'on' : ''}"><span class="sw" style="background:${c}"></span>${n}</button>`).join('')}</div>
     ${installEvt ? '<div class="setrow"><button class="btn" type="button" data-act="install">Install app</button></div>' : ''}</div>
   <div class="sec"><h3>Sync</h3>${sync}</div>
   <details class="sec adv"${S.adv ? ' open' : ''}><summary><h3>Advanced</h3></summary>
@@ -542,7 +617,8 @@ document.addEventListener('click', async e => {
   if (D.view) { S.view = D.view; render(); return; }
   if (D.filter) { S.filter = D.filter; render(); return; }
   if (D.hfilter) { S.hfilter = D.hfilter; render(); return; }
-  if (D.theme) { try { localStorage.setItem(THEME_KEY, D.theme); } catch (x) {} document.documentElement.dataset.theme = D.theme; render(); return; }
+  if (D.theme) { try { localStorage.setItem(THEME_KEY, D.theme); } catch (x) {} applyTheme(D.theme); render(); return; }
+  if (D.calone) { const it = itemById(D.calone); if (it) addToCalendar([it], it.title); return; }
   if (D.open) { openDetail(D.open); return; }
   if (D.use) { if (!canWrite()) return; await fbInit(); const it = itemById(D.use); try { await FB.F.updateDoc(ref(COL.items, it.id), { stillUsing: it.stillUsing === false, updatedAt: now() }); } catch (x) { toast('Could not save.'); } return; }
   if (D.mileage) { openMileage(D.mileage); return; }
@@ -561,6 +637,7 @@ document.addEventListener('click', async e => {
   if (a === 'signout') return signOut();
   if (a === 'syncnow') return syncNow();
   if (a === 'export') return exportBackup();
+  if (a === 'import') return pickImport();
   if (a === 'install') { if (installEvt) { installEvt.prompt(); installEvt = null; render(); } return; }
   if (a === 'close') return closeSheet();
   if (a === 'calweek') { const rows = L.dueList(S.items, S.cars, today()).filter(r => r.days >= 0 && r.days <= 14 && (S.filter === 'all' || (S.filter === 'car' ? L.isCar(r.item.category) : r.item.category === 'subscription'))); return addToCalendar(rows.map(r => r.item), 'next-two-weeks'); }
@@ -575,6 +652,12 @@ document.addEventListener('click', async e => {
   if (a === 'stop') { if (!canWrite() || !confirm('Stop tracking this? It moves to Ended items on the History tab, with its history kept.')) return; await fbInit(); try { await FB.F.updateDoc(ref(COL.items, S.sheet.id), { status: 'done', updatedAt: now() }); closeSheet(); toast('Stopped tracking.'); } catch (x) { toast('Could not save.'); } return; }
   if (a === 'deleteitem') { if (!canWrite() || !confirm('Delete this item? Its history stays.')) return; await fbInit(); try { await FB.F.deleteDoc(ref(COL.items, form.id)); closeSheet(); toast('Deleted.'); } catch (x) { toast('Could not delete.'); } return; }
 });
+function flipCard(fc) {
+  const id = fc.dataset.card; fc.classList.toggle('flipped');
+  if (fc.classList.contains('flipped')) S.flipped.add(id); else S.flipped.delete(id);
+}
+document.addEventListener('click', e => { const fc = e.target.closest('.fc'); if (fc && !e.target.closest('button')) flipCard(fc); });
+document.addEventListener('keydown', e => { if ((e.key === 'Enter' || e.key === ' ') && e.target.classList && e.target.classList.contains('fc')) { e.preventDefault(); flipCard(e.target); } });
 $('#fab').addEventListener('click', async () => {
   await fbInit();
   if (S.tab === 'cars') openCarForm(null);
@@ -599,6 +682,7 @@ window.addEventListener('offline', paintSync);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) { render(); maybeAutoRoll(); } });
 
 /* ---------- start ---------- */
+applyTheme(themeNow());
 loadCache();
 render();
 fbInit().then(() => render());

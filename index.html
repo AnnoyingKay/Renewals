@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Renewals</title>
-<script>try{document.documentElement.dataset.theme=localStorage.getItem("renewals.theme")||"auto"}catch(e){document.documentElement.dataset.theme="auto"}</script>
+<script>try{var t=localStorage.getItem("renewals.theme")||"auto";if(["auto","calm","night","autobahn","cinema","parcel","storybook","household"].indexOf(t)<0)t="auto";document.documentElement.dataset.theme=t}catch(e){document.documentElement.dataset.theme="auto"}</script>
 <link rel="manifest" href="manifest.webmanifest">
 <meta name="theme-color" content="#2c5e6e" id="tc">
 <meta name="apple-mobile-web-app-capable" content="yes">

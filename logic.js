@@ -202,3 +202,112 @@ export function icsFor(list, carName, now) {
   return L.map(fold).join('\r\n') + '\r\n';
 }
 export const fileSlug = s => String(s || 'renewal').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'renewal';
+
+/* ---------- import ----------
+   Reads a Renewals backup file. Only known fields are kept, everything is checked, and one bad row stops the whole import. */
+const STATUS = ['active', 'done'], REPEATS = ['monthly', 'yearly', 'everyN', 'oneOff'], KINDS = ['done', 'auto'];
+export function validateImport(obj, nowMs) {
+  const errors = [], out = { items: [], cars: [], history: [] };
+  const err = m => { if (errors.length < 5) errors.push(m); };
+  if (!obj || typeof obj !== 'object' || obj.app !== 'Renewals') { err('This is not a Renewals file.'); return { ...out, errors }; }
+  const list = k => Array.isArray(obj[k]) ? obj[k] : (obj[k] == null ? [] : (err('"' + k + '" should be a list.'), []));
+  const items = list('items'), cars = list('cars'), history = list('history');
+  if (items.length + cars.length + history.length > 1500) { err('That file is too large.'); return { ...out, errors }; }
+  const idOk = id => typeof id === 'string' && /^[A-Za-z0-9_-]{1,120}$/.test(id);
+  const str = (v, who, label, max) => {
+    if (v == null || v === '') return '';
+    if (typeof v !== 'string' || v.length > (max || 300)) { err(who + ': ' + label + ' is not valid.'); return ''; }
+    if (looksSensitive(v)) err(who + ': ' + label + ' looks like a number that should not be stored.');
+    return v;
+  };
+  const numOrNull = (v, who, label) => {
+    if (v == null || v === '') return null;
+    if (typeof v !== 'number' || !isFinite(v) || v < 0) { err(who + ': ' + label + ' is not valid.'); return null; }
+    return v;
+  };
+  const dateOk = (v, who, label) => { if (!isISO(v)) { err(who + ': ' + label + ' is not a date.'); return false; } return true; };
+  const stamp = v => (typeof v === 'number' && isFinite(v)) ? v : nowMs;
+
+  for (const c of cars) {
+    const who = (c && c.name) || 'car';
+    if (!c || !idOk(c.id)) { err('A car has no valid id.'); continue; }
+    const name = str(c.name, who, 'name', 80); if (!name) { err('A car has no name.'); continue; }
+    out.cars.push({ id: c.id, name, reg: str(c.reg, who, 'registration', 20), currentMileage: numOrNull(c.currentMileage, who, 'mileage'),
+      mileageUpdatedAt: typeof c.mileageUpdatedAt === 'number' ? c.mileageUpdatedAt : null, createdAt: stamp(c.createdAt) });
+  }
+  for (const i of items) {
+    const who = (i && i.title) || 'item';
+    if (!i || !idOk(i.id)) { err('An item has no valid id.'); continue; }
+    if (!CATS[i.category]) { err(who + ': unknown category.'); continue; }
+    const title = str(i.title, who, 'title', 120); if (!title) { err('An item has no title.'); continue; }
+    if (!dateOk(i.dueDate, who, 'due date')) continue;
+    if (!STATUS.includes(i.status)) { err(who + ': status should be active or done.'); continue; }
+    const r = i.repeat; if (!r || !REPEATS.includes(r.type)) { err(who + ': repeat is not valid.'); continue; }
+    let repeat = { type: r.type };
+    if (r.type === 'everyN') { if (!Number.isInteger(r.n) || r.n < 1 || r.n > 120) { err(who + ': repeat months is not valid.'); continue; } repeat.n = r.n; }
+    let lead = Array.isArray(i.leadDays) && i.leadDays.length && i.leadDays.length <= 8 && i.leadDays.every(n => Number.isInteger(n) && n >= 0 && n <= 365) ? i.leadDays.slice().sort((a, b) => b - a) : null;
+    if (!lead) { err(who + ': reminders are not valid.'); continue; }
+    if (i.carId != null && !idOk(i.carId)) { err(who + ': car is not valid.'); continue; }
+    out.items.push({ id: i.id, category: i.category, title, provider: str(i.provider, who, 'provider', 120), amount: numOrNull(i.amount, who, 'amount'),
+      dueDate: i.dueDate, status: i.status, repeat, anchorDay: (Number.isInteger(i.anchorDay) && i.anchorDay >= 1 && i.anchorDay <= 31) ? i.anchorDay : parseISO(i.dueDate).d,
+      leadDays: lead, notes: str(i.notes, who, 'notes', 600), carId: i.carId || null, dueMileage: numOrNull(i.dueMileage, who, 'service mileage'),
+      serviceIntervalKm: numOrNull(i.serviceIntervalKm, who, 'service interval'), stillUsing: typeof i.stillUsing === 'boolean' ? i.stillUsing : null,
+      createdAt: stamp(i.createdAt), updatedAt: stamp(i.updatedAt) });
+  }
+  for (const h of history) {
+    const who = (h && h.title) || 'history row';
+    if (!h || !idOk(h.id) || !idOk(h.itemId)) { err('A history row has no valid id.'); continue; }
+    if (!dateOk(h.doneAt, who, 'date done') || !dateOk(h.dueDate, who, 'due date')) continue;
+    const title = str(h.title, who, 'title', 120); if (!title) { err('A history row has no title.'); continue; }
+    out.history.push({ id: h.id, itemId: h.itemId, title, category: CATS[h.category] ? h.category : 'subscription', carId: h.carId || null, provider: str(h.provider, who, 'provider', 120),
+      dueDate: h.dueDate, doneAt: h.doneAt, amountPaid: numOrNull(h.amountPaid, who, 'amount'), mileage: numOrNull(h.mileage, who, 'mileage'),
+      note: str(h.note, who, 'note', 300), kind: KINDS.includes(h.kind) ? h.kind : 'done', createdAt: stamp(h.createdAt) });
+  }
+  return { ...out, errors };
+}
+
+/* ---------- cover page ---------- */
+const WD_LONG = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const MO_LONG = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+export function fmtLong(iso) {
+  const { y, m, d } = parseISO(iso), wd = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+  return WD_LONG[wd] + ' ' + d + ' ' + MO_LONG[m - 1];
+}
+export function greeting(hour, name) {
+  const g = hour >= 5 && hour < 12 ? 'Good morning' : hour >= 12 && hour < 18 ? 'Good afternoon' : 'Good evening';
+  return g + (name ? ', ' + name : '') + '.';
+}
+export const firstName = full => { const w = String(full || '').trim().split(/\s+/)[0] || ''; return /^[A-Za-zÀ-ÿ'’]{2,20}$/.test(w) ? w : ''; };
+const eur0 = n => '€' + Math.round(n).toLocaleString('en-IE');
+/* One dry line for the top of the cover. It changes once a day and never at random on a redraw. */
+export function coverLine(o) {
+  const L1 = [];
+  if (!o.tracked) return 'Nothing tracked yet. Your subscriptions are already tracking you.';
+  if (o.subCount > 0) {
+    L1.push(
+      o.subCount + (o.subCount === 1 ? ' subscription. You own none of it.' : ' subscriptions. You own none of them.'),
+      eur0(o.yearly) + ' a year to rent things you will never own.',
+      'You pay ' + eur0(o.monthly) + ' a month for access. Ownership was not on the menu.',
+      'Entertainment on a lease: ' + '€' + (o.yearly / 365).toFixed(2) + ' a day.',
+      'You do not own the films, the music or the games. You do own the direct debit.',
+      'Cancelling is free. Remembering to cancel is the expensive part.',
+      'Everything here is borrowed, and the lender is very organised about collecting.'
+    );
+  }
+  L1.push('Renewals arrive whether you look or not. So, look.', 'Nothing here renews itself in your favour.');
+  const cand = L1.slice();
+  if (o.overdue > 0) {
+    const l = [o.overdue + ' overdue. It will not sort itself out.', 'Overdue: ' + o.overdue + '. Admin does not age well.', o.overdue + ' overdue. The date has passed, and it noticed.'];
+    cand.push(...l, ...l);
+  }
+  if (o.unusedMonthly > 0) {
+    cand.push('€' + o.unusedMonthly.toFixed(2) + ' a month goes to things you said you do not use.');
+    if (o.unusedName) cand.push(o.unusedName + ' is marked as not in use, and still bills you. Loyal, at least.', o.unusedName + ': unused, unforgotten, unrefunded.');
+  }
+  if (!o.overdue && !o.next30) cand.push('Nothing due this month. Suspicious, but welcome.');
+  return cand[Math.abs(o.seed | 0) % cand.length];
+}
+export function seedFor(todayIso, uid) {
+  let h = 0; for (const c of String(uid || '')) h = (h * 31 + c.charCodeAt(0)) % 9973;
+  return dayNum(todayIso) + h;
+}

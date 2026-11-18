@@ -1,5 +1,5 @@
 /* Renewals service worker. Network first, falls back to the saved copy when offline. */
-const CACHE = 'renewals-v1';
+const CACHE = 'renewals-v3';
 const SDK = 'renewals-sdk';
 const FILES = ['./', './index.html', './style.css', './app.js', './logic.js', './manifest.webmanifest', './firebase-config.js', './icon-192.png', './icon-512.png'];
 
